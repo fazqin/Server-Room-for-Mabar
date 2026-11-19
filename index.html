@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mabar Room</title>
+<style>
+  :root{--bg:#0f1115;--panel:#181b22;--line:#262b36;--txt:#e8eaf0;--dim:#8b93a5;--ok:#3ddc84;--bad:#ff5d5d;--acc:#5b8cff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:760px;margin:0 auto;padding:20px}
+  h1{margin:8px 0 2px;font-size:22px}
+  .sub,.hint{color:var(--dim);margin:0 0 16px}
+  label{display:block;margin:12px 0;color:var(--dim);font-size:13px}
+  input[type=text],select{width:100%;margin-top:4px;padding:10px;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--txt);font-size:15px}
+  button{background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:9px 14px;font-size:14px;cursor:pointer}
+  button:hover{border-color:var(--acc)}
+  .primary{background:var(--acc);border-color:var(--acc);color:#fff;width:100%;padding:12px;font-size:16px}
+  .err{color:var(--bad);min-height:1.2em}
+  header{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  header b{font-size:17px}
+  #status{color:var(--dim);font-size:13px;flex:1}
+  #cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+  .card{background:var(--panel);border:2px solid var(--line);border-radius:12px;padding:12px;transition:border-color .08s,box-shadow .08s}
+  .card.talk{border-color:var(--ok);box-shadow:0 0 0 3px rgba(61,220,132,.25)}
+  .card .nm{font-weight:600;display:flex;justify-content:space-between;gap:8px}
+  .card .meta{color:var(--dim);font-size:12px;margin-top:2px;min-height:1.2em}
+  .card.off .nm::after{content:"MUTE";color:var(--bad);font-size:11px;border:1px solid var(--bad);border-radius:4px;padding:0 5px}
+  .card input[type=range]{width:100%;margin:8px 0 0}
+  #controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:16px 0;padding:12px;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+  #controls select{width:auto;max-width:210px;margin:0;padding:8px}
+  #mute{min-width:150px;font-weight:600;border-color:var(--ok);color:var(--ok)}
+  #mute.off{border-color:var(--bad);color:var(--bad)}
+  .chk{display:flex;gap:6px;align-items:center;margin:0;color:var(--txt);font-size:14px}
+  #screens{display:grid;gap:10px}
+  .tile{background:#000;border:1px solid var(--line);border-radius:12px;overflow:hidden;position:relative}
+  .tile video{width:100%;display:block;max-height:70vh;object-fit:contain;cursor:pointer}
+  .tile .cap{position:absolute;left:8px;top:8px;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:6px;font-size:12px}
+</style>
+</head>
+<body>
+
+<div id="lobby" class="wrap">
+  <h1>Mabar Room</h1>
+  <p class="sub">Voice chat ringan, tanpa akun.</p>
+  <label>Nama <input id="name" type="text" maxlength="24" autocomplete="off"></label>
+  <label>Kode room <input id="code" type="text" maxlength="32" autocomplete="off"></label>
+  <button id="join" class="primary">Masuk</button>
+  <p id="err" class="err"></p>
+  <p class="hint">Pakai headset supaya tidak ada gema. Bagikan link setelah masuk.</p>
+</div>
+
+<div id="room" class="wrap" hidden>
+  <header>
+    <b id="roomName"></b>
+    <span id="status"></span>
+    <button id="copy">Salin link</button>
+    <button id="leave">Keluar</button>
+  </header>
+  <div id="cards"></div>
+  <div id="controls">
+    <button id="mute">Mic NYALA (M)</button>
+    <label class="chk"><input type="checkbox" id="ptt"> Push-to-talk</label>
+    <button id="pttKey"></button>
+    <select id="mic" title="Pilih mikrofon"></select>
+    <select id="quality" title="Kualitas share screen">
+      <option value="480">Share 480p</option>
+      <option value="720" selected>Share 720p</option>
+      <option value="1080">Share 1080p</option>
+    </select>
+    <button id="share">Share screen</button>
+  </div>
+  <div id="screens"></div>
+</div>
+<div id="sink" hidden></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const LS = {
+  get: (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
+};
+
+const AUDIO_KBPS = 40; // Opus mono 40 kbps: jernih untuk suara, sangat hemat
+const QUALITY = {
+  480: { w: 854, h: 480, fps: 30, kbps: 800 },
+  720: { w: 1280, h: 720, fps: 30, kbps: 2000 },
+  1080: { w: 1920, h: 1080, fps: 30, kbps: 3500 },
+};
+
+let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+let ws, myId, myName, roomId, joined = false;
+let micStream, micTrack, screenStream, audioCtx, curQ = QUALITY[720];
+let muted = false, pttMode = LS.get('ptt', '0') === '1', pttKey = LS.get('pttKey', 'KeyV'), pttDown = false, settingKey = false;
+const peers = new Map();
+const meters = new Map();
+
+// ---------- Lobby ----------
+const pathRoom = (location.pathname.match(/^\/room\/([a-z0-9-]+)/i) || [])[1];
+$('#name').value = LS.get('name', '');
+$('#code').value = pathRoom || Math.random().toString(36).slice(2, 8);
+$('#join').onclick = join;
+$('#code').onkeydown = $('#name').onkeydown = (e) => { if (e.key === 'Enter') join(); };
+
+async function join() {
+  myName = $('#name').value.trim() || 'Pemain' + Math.floor(Math.random() * 100);
+  roomId = $('#code').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 32);
+  if (!roomId) return;
+  LS.set('name', myName);
+  $('#err').textContent = '';
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)(); // dibuat dari klik user
+  try {
+    await startMic(LS.get('micId', ''));
+  } catch (e) {
+    $('#err').textContent = 'Mic tidak bisa diakses: ' + (e.message || e.name) + '. Pastikan halaman dibuka lewat HTTPS dan izin mic diberikan.';
+    return;
+  }
+  try { iceServers = (await (await fetch('/config')).json()).iceServers; } catch {}
+  history.replaceState(null, '', '/room/' + roomId);
+  joined = true;
+  $('#lobby').hidden = true;
+  $('#room').hidden = false;
+  $('#roomName').textContent = 'Room: ' + roomId;
+  $('#ptt').checked = pttMode;
+  renderPttKey();
+  fillDevices();
+  connectWS();
+}
+
+// ---------- Mic ----------
+async function startMic(deviceId) {
+  const s = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      deviceId: deviceId ? { exact: deviceId } : undefined,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      channelCount: 1,
+      sampleRate: 48000,
+    },
+    video: false,
+  });
+  const old = micTrack;
+  micStream = s;
+  micTrack = s.getAudioTracks()[0];
+  micTrack.contentHint = 'speech';
+  if (old) old.stop();
+  applyMic();
+  for (const p of peers.values()) if (p.micSender) p.micSender.replaceTrack(micTrack).catch(() => {});
+  meters.get('me')?.src.disconnect();
+  meters.delete('me');
+  watch('me', micStream);
+  const id = micTrack.getSettings().deviceId;
+  if (id) LS.set('micId', id);
+}
+
+async function fillDevices() {
+  try {
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput');
+    const cur = micTrack.getSettings().deviceId;
+    $('#mic').innerHTML = '';
+    devs.forEach((d, i) => {
+      const o = document.createElement('option');
+      o.value = d.deviceId;
+      o.textContent = d.label || 'Mikrofon ' + (i + 1);
+      if (d.deviceId === cur) o.selected = true;
+      $('#mic').appendChild(o);
+    });
+  } catch {}
+}
+$('#mic').onchange = async (e) => {
+  try { await startMic(e.target.value); } catch (err) { setStatus('Gagal ganti mic: ' + err.message); }
+};
+
+function applyMic() {
+  if (!micTrack) return;
+  micTrack.enabled = !muted && (!pttMode || pttDown);
+  const open = micTrack.enabled;
+  $('#mute').textContent = muted ? 'Mic MATI (M)' : pttMode ? (open ? 'Bicara…' : 'Tahan tombol PTT') : 'Mic NYALA (M)';
+  $('#mute').classList.toggle('off', muted);
+  document.getElementById('c-me')?.classList.toggle('off', !open);
+}
+$('#mute').onclick = () => { muted = !muted; applyMic(); };
+$('#ptt').onchange = (e) => { pttMode = e.target.checked; LS.set('ptt', pttMode ? '1' : '0'); pttDown = false; applyMic(); };
+$('#pttKey').onclick = () => { settingKey = true; $('#pttKey').textContent = 'Tekan tombol…'; };
+function renderPttKey() { $('#pttKey').textContent = 'Tombol PTT: ' + pttKey.replace('Key', '').replace('Digit', ''); }
+
+addEventListener('keydown', (e) => {
+  if (!joined) return;
+  if (settingKey) { e.preventDefault(); pttKey = e.code; LS.set('pttKey', pttKey); settingKey = false; renderPttKey(); return; }
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.code === pttKey && pttMode && !e.repeat) { pttDown = true; applyMic(); }
+  if (e.code === 'KeyM' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) { muted = !muted; applyMic(); }
+});
+addEventListener('keyup', (e) => { if (e.code === pttKey && pttMode) { pttDown = false; applyMic(); } });
+addEventListener('blur', () => { if (pttMode) { pttDown = false; applyMic(); } });
+
+// ---------- Indikator bicara ----------
+function watch(id, stream) {
+  const src = audioCtx.createMediaStreamSource(stream);
+  const an = audioCtx.createAnalyser();
+  an.fftSize = 512;
+  src.connect(an); // tidak disambung ke destination, jadi tidak ada suara dobel
+  meters.set(id, { an, src, buf: new Uint8Array(an.fftSize) });
+}
+setInterval(() => {
+  for (const [id, m] of meters) {
+    m.an.getByteTimeDomainData(m.buf);
+    let s = 0;
+    for (const v of m.buf) { const x = (v - 128) / 128; s += x * x; }
+    document.getElementById('c-' + id)?.classList.toggle('talk', Math.sqrt(s / m.buf.length) > 0.03);
+  }
+}, 100);
+
+// ---------- Signaling ----------
+const send = (o) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
+const setStatus = (t) => ($('#status').textContent = t);
+
+function connectWS() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+  ws.onopen = () => { setStatus('Terhubung'); send({ type: 'join', room: roomId, name: myName }); };
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'joined') {
+      myId = m.id;
+      document.getElementById('c-me')?.remove();
+      addCard('me', myName + ' (kamu)', true);
+      applyMic();
+      m.peers.forEach((p) => createPeer(p.id, p.name)); // pendatang baru yang memulai koneksi
+    } else if (m.type === 'signal') onSignal(m.from, m.name, m.data);
+    else if (m.type === 'peer-left') removePeer(m.id);
+    else if (m.type === 'full') { joined = false; alert('Room penuh.'); location.href = '/'; }
+  };
+  ws.onclose = () => {
+    if (!joined) return;
+    setStatus('Terputus, menyambung ulang…');
+    [...peers.keys()].forEach(removePeer);
+    setTimeout(connectWS, 2000);
+  };
+}
+
+// ---------- WebRTC (perfect negotiation) ----------
+function tuneOpus(sdp) {
+  const m = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/);
+  if (!m) return sdp;
+  const pt = m[1];
+  const extra = { useinbandfec: 1, stereo: 0, 'sprop-stereo': 0, maxaveragebitrate: AUDIO_KBPS * 1000, maxplaybackrate: 48000 };
+  return sdp.replace(new RegExp('a=fmtp:' + pt + ' ([^\\r\\n]*)'), (_, params) => {
+    const o = {};
+    params.split(';').forEach((kv) => { const [k, v] = kv.split('='); if (k) o[k.trim()] = v; });
+    Object.assign(o, extra);
+    return 'a=fmtp:' + pt + ' ' + Object.entries(o).map(([k, v]) => k + '=' + v).join(';');
+  });
+}
+
+async function tuneSenders(p) {
+  try {
+    if (p.micSender) {
+      const pr = p.micSender.getParameters();
+      if (!pr.encodings || !pr.encodings.length) pr.encodings = [{}];
+      pr.encodings[0].maxBitrate = AUDIO_KBPS * 1000;
+      pr.encodings[0].priority = 'high';
+      pr.encodings[0].networkPriority = 'high';
+      await p.micSender.setParameters(pr);
+    }
+    if (p.screenSender) {
+      const pr = p.screenSender.getParameters();
+      if (!pr.encodings || !pr.encodings.length) pr.encodings = [{}];
+      pr.encodings[0].maxBitrate = curQ.kbps * 1000;
+      pr.encodings[0].maxFramerate = curQ.fps;
+      pr.encodings[0].priority = 'low';        // audio selalu didahulukan
+      pr.encodings[0].networkPriority = 'low';
+      await p.screenSender.setParameters(pr);
+    }
+  } catch {}
+}
+
+function createPeer(id, name) {
+  const pc = new RTCPeerConnection({ iceServers });
+  const p = { id, name, pc, makingOffer: false, ignoreOffer: false, polite: myId < id, vol: 1, micSender: null, screenSender: null, audio: null };
+  peers.set(id, p);
+  addCard(id, name, false);
+
+  p.micSender = pc.addTrack(micTrack, micStream);
+  if (screenStream) addScreen(p);
+
+  pc.onnegotiationneeded = async () => {
+    try {
+      p.makingOffer = true;
+      const o = await pc.createOffer();
+      o.sdp = tuneOpus(o.sdp);
+      if (pc.signalingState !== 'stable') return;
+      await pc.setLocalDescription(o);
+      send({ type: 'signal', to: id, data: { description: pc.localDescription } });
+      tuneSenders(p);
+    } catch (e) { console.error(e); } finally { p.makingOffer = false; }
+  };
+  pc.onicecandidate = ({ candidate }) => { if (candidate) send({ type: 'signal', to: id, data: { candidate } }); };
+  pc.oniceconnectionstatechange = () => { if (pc.iceConnectionState === 'failed') pc.restartIce(); };
+  pc.ontrack = ({ track, streams }) => {
+    const stream = streams[0] || new MediaStream([track]);
+    if (track.kind === 'audio') {
+      const a = new Audio();
+      a.autoplay = true;
+      a.srcObject = stream;
+      a.volume = p.vol;
+      $('#sink').appendChild(a);
+      p.audio = a;
+      a.play().catch(() => {});
+      audioCtx.resume();
+      watch(id, stream);
+    } else {
+      showTile(p, stream);
+    }
+  };
+  return p;
+}
+
+async function onSignal(from, name, data) {
+  const p = peers.get(from) || createPeer(from, name);
+  const pc = p.pc;
+  try {
+    if (data.description) {
+      const d = data.description;
+      const collision = d.type === 'offer' && (p.makingOffer || pc.signalingState !== 'stable');
+      p.ignoreOffer = !p.polite && collision;
+      if (p.ignoreOffer) return;
+      await pc.setRemoteDescription(d);
+      if (d.type === 'offer') {
+        const ans = await pc.createAnswer();
+        ans.sdp = tuneOpus(ans.sdp);
+        await pc.setLocalDescription(ans);
+        send({ type: 'signal', to: from, data: { description: pc.localDescription } });
+        tuneSenders(p);
+      }
+    } else if (data.candidate) {
+      try { await pc.addIceCandidate(data.candidate); } catch (e) { if (!p.ignoreOffer) throw e; }
+    } else if ('screen' in data && !data.screen) {
+      removeTile(from);
+    }
+  } catch (e) { console.error(e); }
+}
+
+function removePeer(id) {
+  const p = peers.get(id);
+  if (!p) return;
+  try { p.pc.close(); } catch {}
+  if (p.audio) { p.audio.srcObject = null; p.audio.remove(); }
+  const m = meters.get(id);
+  if (m) { m.src.disconnect(); meters.delete(id); }
+  document.getElementById('c-' + id)?.remove();
+  removeTile(id);
+  peers.delete(id);
+}
+
+// ---------- UI kartu & layar ----------
+function addCard(id, name, isMe) {
+  const c = document.createElement('div');
+  c.className = 'card';
+  c.id = 'c-' + id;
+  const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = name;
+  const meta = document.createElement('div'); meta.className = 'meta'; meta.id = 'meta-' + id; meta.textContent = isMe ? 'Mic kamu' : 'Menyambung…';
+  c.append(nm, meta);
+  if (!isMe) {
+    const r = document.createElement('input');
+    r.type = 'range'; r.min = 0; r.max = 100; r.value = 100; r.title = 'Volume ' + name;
+    r.oninput = () => { const p = peers.get(id); if (p) { p.vol = r.value / 100; if (p.audio) p.audio.volume = p.vol; } };
+    c.appendChild(r);
+  }
+  $('#cards').appendChild(c);
+}
+
+function showTile(p, stream) {
+  removeTile(p.id);
+  const t = document.createElement('div');
+  t.className = 'tile'; t.id = 't-' + p.id;
+  const cap = document.createElement('div'); cap.className = 'cap'; cap.textContent = p.name + ' sedang share screen';
+  const v = document.createElement('video');
+  v.autoplay = true; v.playsInline = true; v.muted = true; v.srcObject = stream;
+  v.title = 'Klik untuk layar penuh';
+  v.onclick = () => (document.fullscreenElement ? document.exitFullscreen() : v.requestFullscreen?.());
+  t.append(cap, v);
+  $('#screens').appendChild(t);
+}
+function removeTile(id) { document.getElementById('t-' + id)?.remove(); }
+
+// ---------- Share screen ----------
+function addScreen(p) {
+  const t = screenStream.getVideoTracks()[0];
+  p.screenSender = p.pc.addTrack(t, screenStream);
+  send({ type: 'signal', to: p.id, data: { screen: true } });
+}
+async function startShare() {
+  curQ = QUALITY[$('#quality').value];
+  try {
+    screenStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { width: { max: curQ.w }, height: { max: curQ.h }, frameRate: { max: curQ.fps } },
+      audio: false,
+    });
+  } catch { return; }
+  const t = screenStream.getVideoTracks()[0];
+  t.contentHint = 'detail';
+  t.onended = stopShare;
+  for (const p of peers.values()) addScreen(p);
+  $('#share').textContent = 'Stop share';
+  $('#quality').disabled = true;
+}
+function stopShare() {
+  if (!screenStream) return;
+  screenStream.getTracks().forEach((t) => t.stop());
+  screenStream = null;
+  for (const p of peers.values()) {
+    if (p.screenSender) {
+      try { p.pc.removeTrack(p.screenSender); } catch {}
+      p.screenSender = null;
+      send({ type: 'signal', to: p.id, data: { screen: false } });
+    }
+  }
+  $('#share').textContent = 'Share screen';
+  $('#quality').disabled = false;
+}
+$('#share').onclick = () => (screenStream ? stopShare() : startShare());
+
+// ---------- Ping & tipe koneksi ----------
+setInterval(async () => {
+  for (const p of peers.values()) {
+    try {
+      const st = await p.pc.getStats();
+      let rtt, relay = false;
+      st.forEach((r) => {
+        if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') {
+          rtt = r.currentRoundTripTime;
+          const lc = st.get(r.localCandidateId);
+          if (lc && lc.candidateType === 'relay') relay = true;
+        }
+      });
+      const el = document.getElementById('meta-' + p.id);
+      if (el && rtt != null) el.textContent = Math.round(rtt * 1000) + ' ms' + (relay ? ' (relay)' : ' (langsung)');
+    } catch {}
+  }
+}, 3000);
+
+// ---------- Lain-lain ----------
+$('#copy').onclick = async () => {
+  try { await navigator.clipboard.writeText(location.href); setStatus('Link disalin'); } catch { prompt('Salin link:', location.href); }
+};
+$('#leave').onclick = () => { joined = false; try { ws.close(); } catch {} location.href = '/'; };
+addEventListener('beforeunload', () => { joined = false; });
+</script>
+</body>
+</html>

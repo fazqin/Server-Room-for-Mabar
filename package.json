@@ -1,0 +1,15 @@
+{
+  "name": "mabar-room",
+  "version": "1.0.0",
+  "description": "Voice room P2P ringan untuk mabar (WebRTC mesh, max 5 orang)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
